@@ -1,0 +1,18 @@
+# File path: /etc/systemd/system/solqora-core.service
+# sudo systemctl daemon-reload
+# sudo systemctl start solqora-core
+# sudo systemctl enable solqora-core
+# sudo systemctl status solqora-core
+[Unit]
+Description=One API Service
+After=network.target
+
+[Service]
+User=ubuntu  # 注意修改用户名
+WorkingDirectory=/path/to/solqora-core  # 注意修改路径
+ExecStart=/path/to/solqora-core/solqora-core --port 3000 --log-dir /path/to/solqora-core/logs  # 注意修改路径和端口号
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

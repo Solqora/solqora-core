@@ -1,0 +1,535 @@
+package ali
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
+
+	"github.com/solqora/solqora-core/common"
+	"github.com/solqora/solqora-core/dto"
+	"github.com/solqora/solqora-core/logger"
+	"github.com/solqora/solqora-core/model"
+	"github.com/solqora/solqora-core/relay/channel"
+	"github.com/solqora/solqora-core/relay/channel/task/taskcommon"
+	relaycommon "github.com/solqora/solqora-core/relay/common"
+	"github.com/solqora/solqora-core/service"
+	"github.com/samber/lo"
+
+	"github.com/gin-gonic/gin"
+	"github.com/pkg/errors"
+)
+
+// ============================
+// Request / Response structures
+// ============================
+
+// AliVideoRequest 
+type AliVideoRequest struct {
+	Model      string              `json:"model"`
+	Input      AliVideoInput       `json:"input"`
+	Parameters *AliVideoParameters `json:"parameters,omitempty"`
+}
+
+// AliVideoInput 
+type AliVideoInput struct {
+	Prompt         string `json:"prompt,omitempty"`          // 
+	ImgURL         string `json:"img_url,omitempty"`         // URLBase64
+	FirstFrameURL  string `json:"first_frame_url,omitempty"` // URL
+	LastFrameURL   string `json:"last_frame_url,omitempty"`  // URL
+	AudioURL       string `json:"audio_url,omitempty"`       // URLwan2.5
+	NegativePrompt string `json:"negative_prompt,omitempty"` // 
+	Template       string `json:"template,omitempty"`        // 
+}
+
+// AliVideoParameters 
+type AliVideoParameters struct {
+	Resolution   string `json:"resolution,omitempty"`    // : 480P/720P/1080P
+	Size         string `json:"size,omitempty"`          // :  "832*480"
+	Duration     int    `json:"duration,omitempty"`      // : 3-10
+	PromptExtend bool   `json:"prompt_extend,omitempty"` // prompt
+	Watermark    bool   `json:"watermark,omitempty"`     // 
+	Audio        *bool  `json:"audio,omitempty"`         // wan2.5
+	Seed         int    `json:"seed,omitempty"`          // 
+}
+
+// AliVideoResponse 
+type AliVideoResponse struct {
+	Output    AliVideoOutput `json:"output"`
+	RequestID string         `json:"request_id"`
+	Code      string         `json:"code,omitempty"`
+	Message   string         `json:"message,omitempty"`
+	Usage     *AliUsage      `json:"usage,omitempty"`
+}
+
+// AliVideoOutput 
+type AliVideoOutput struct {
+	TaskID        string `json:"task_id"`
+	TaskStatus    string `json:"task_status"`
+	SubmitTime    string `json:"submit_time,omitempty"`
+	ScheduledTime string `json:"scheduled_time,omitempty"`
+	EndTime       string `json:"end_time,omitempty"`
+	OrigPrompt    string `json:"orig_prompt,omitempty"`
+	ActualPrompt  string `json:"actual_prompt,omitempty"`
+	VideoURL      string `json:"video_url,omitempty"`
+	Code          string `json:"code,omitempty"`
+	Message       string `json:"message,omitempty"`
+}
+
+// AliUsage 
+type AliUsage struct {
+	Duration   dto.IntValue `json:"duration,omitempty"`
+	VideoCount dto.IntValue `json:"video_count,omitempty"`
+	SR         dto.IntValue `json:"SR,omitempty"`
+}
+
+type AliMetadata struct {
+	// Input 
+	AudioURL       string `json:"audio_url,omitempty"`       // URL
+	ImgURL         string `json:"img_url,omitempty"`         // URL
+	FirstFrameURL  string `json:"first_frame_url,omitempty"` // URL
+	LastFrameURL   string `json:"last_frame_url,omitempty"`  // URL
+	NegativePrompt string `json:"negative_prompt,omitempty"` // 
+	Template       string `json:"template,omitempty"`        // 
+
+	// Parameters 
+	Resolution   *string `json:"resolution,omitempty"`    // : 480P/720P/1080P
+	Size         *string `json:"size,omitempty"`          // :  "832*480"
+	Duration     *int    `json:"duration,omitempty"`      // 
+	PromptExtend *bool   `json:"prompt_extend,omitempty"` // prompt
+	Watermark    *bool   `json:"watermark,omitempty"`     // 
+	Audio        *bool   `json:"audio,omitempty"`         // 
+	Seed         *int    `json:"seed,omitempty"`          // 
+}
+
+// ============================
+// Adaptor implementation
+// ============================
+
+type TaskAdaptor struct {
+	taskcommon.BaseBilling
+	ChannelType int
+	apiKey      string
+	baseURL     string
+}
+
+func (a *TaskAdaptor) Init(info *relaycommon.RelayInfo) {
+	a.ChannelType = info.ChannelType
+	a.baseURL = info.ChannelBaseUrl
+	a.apiKey = info.ApiKey
+}
+
+func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycommon.RelayInfo) (taskErr *dto.TaskError) {
+	// ValidateMultipartDirect  TaskSubmitReq  context
+	return relaycommon.ValidateMultipartDirect(c, info)
+}
+
+func (a *TaskAdaptor) BuildRequestURL(info *relaycommon.RelayInfo) (string, error) {
+	return fmt.Sprintf("%s/api/v1/services/aigc/video-generation/video-synthesis", a.baseURL), nil
+}
+
+// BuildRequestHeader sets required headers for Ali API
+func (a *TaskAdaptor) BuildRequestHeader(c *gin.Context, req *http.Request, info *relaycommon.RelayInfo) error {
+	req.Header.Set("Authorization", "Bearer "+a.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DashScope-Async", "enable") // 
+	return nil
+}
+
+func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayInfo) (io.Reader, error) {
+	taskReq, err := relaycommon.GetTaskRequest(c)
+	if err != nil {
+		return nil, errors.Wrap(err, "get_task_request_failed")
+	}
+
+	aliReq, err := a.convertToAliRequest(info, taskReq)
+	if err != nil {
+		return nil, errors.Wrap(err, "convert_to_ali_request_failed")
+	}
+	logger.LogJson(c, "ali video request body", aliReq)
+
+	bodyBytes, err := common.Marshal(aliReq)
+	if err != nil {
+		return nil, errors.Wrap(err, "marshal_ali_request_failed")
+	}
+	return bytes.NewReader(bodyBytes), nil
+}
+
+var (
+	size480p = []string{
+		"832*480",
+		"480*832",
+		"624*624",
+	}
+	size720p = []string{
+		"1280*720",
+		"720*1280",
+		"960*960",
+		"1088*832",
+		"832*1088",
+	}
+	size1080p = []string{
+		"1920*1080",
+		"1080*1920",
+		"1440*1440",
+		"1632*1248",
+		"1248*1632",
+	}
+)
+
+func sizeToResolution(size string) (string, error) {
+	if lo.Contains(size480p, size) {
+		return "480P", nil
+	} else if lo.Contains(size720p, size) {
+		return "720P", nil
+	} else if lo.Contains(size1080p, size) {
+		return "1080P", nil
+	}
+	return "", fmt.Errorf("invalid size: %s", size)
+}
+
+func ProcessAliOtherRatios(aliReq *AliVideoRequest) (map[string]float64, error) {
+	otherRatios := make(map[string]float64)
+	aliRatios := map[string]map[string]float64{
+		"wan2.6-i2v": {
+			"720P":  1,
+			"1080P": 1 / 0.6,
+		},
+		"wan2.5-t2v-preview": {
+			"480P":  1,
+			"720P":  2,
+			"1080P": 1 / 0.3,
+		},
+		"wan2.2-t2v-plus": {
+			"480P":  1,
+			"1080P": 0.7 / 0.14,
+		},
+		"wan2.5-i2v-preview": {
+			"480P":  1,
+			"720P":  2,
+			"1080P": 1 / 0.3,
+		},
+		"wan2.2-i2v-plus": {
+			"480P":  1,
+			"1080P": 0.7 / 0.14,
+		},
+		"wan2.2-kf2v-flash": {
+			"480P":  1,
+			"720P":  2,
+			"1080P": 4.8,
+		},
+		"wan2.2-i2v-flash": {
+			"480P": 1,
+			"720P": 2,
+		},
+		"wan2.2-s2v": {
+			"480P": 1,
+			"720P": 0.9 / 0.5,
+		},
+	}
+	var resolution string
+
+	// size match
+	if aliReq.Parameters.Size != "" {
+		toResolution, err := sizeToResolution(aliReq.Parameters.Size)
+		if err != nil {
+			return nil, err
+		}
+		resolution = toResolution
+	} else {
+		resolution = strings.ToUpper(aliReq.Parameters.Resolution)
+		if !strings.HasSuffix(resolution, "P") {
+			resolution = resolution + "P"
+		}
+	}
+	if otherRatio, ok := aliRatios[aliReq.Model]; ok {
+		if ratio, ok := otherRatio[resolution]; ok {
+			otherRatios[fmt.Sprintf("resolution-%s", resolution)] = ratio
+		}
+	}
+	return otherRatios, nil
+}
+
+func (a *TaskAdaptor) convertToAliRequest(info *relaycommon.RelayInfo, req relaycommon.TaskSubmitReq) (*AliVideoRequest, error) {
+	upstreamModel := req.Model
+	if info.IsModelMapped {
+		upstreamModel = info.UpstreamModelName
+	}
+	aliReq := &AliVideoRequest{
+		Model: upstreamModel,
+		Input: AliVideoInput{
+			Prompt: req.Prompt,
+			ImgURL: req.InputReference,
+		},
+		Parameters: &AliVideoParameters{
+			PromptExtend: true, // 
+			Watermark:    false,
+		},
+	}
+
+	// 
+	if req.Size != "" {
+		// text to video size must be contained *
+		if strings.Contains(req.Model, "t2v") && !strings.Contains(req.Size, "*") {
+			return nil, fmt.Errorf("invalid size: %s, example: %s", req.Size, "1920*1080")
+		}
+		if strings.Contains(req.Size, "*") {
+			aliReq.Parameters.Size = req.Size
+		} else {
+			resolution := strings.ToUpper(req.Size)
+			//  480p, 720p, 1080p  480P, 720P, 1080P
+			if !strings.HasSuffix(resolution, "P") {
+				resolution = resolution + "P"
+			}
+			aliReq.Parameters.Resolution = resolution
+		}
+	} else {
+		// 
+		if strings.Contains(req.Model, "t2v") { // image to video
+			if strings.HasPrefix(req.Model, "wan2.5") {
+				aliReq.Parameters.Size = "1920*1080"
+			} else if strings.HasPrefix(req.Model, "wan2.2") {
+				aliReq.Parameters.Size = "1920*1080"
+			} else {
+				aliReq.Parameters.Size = "1280*720"
+			}
+		} else {
+			if strings.HasPrefix(req.Model, "wan2.6") {
+				aliReq.Parameters.Resolution = "1080P"
+			} else if strings.HasPrefix(req.Model, "wan2.5") {
+				aliReq.Parameters.Resolution = "1080P"
+			} else if strings.HasPrefix(req.Model, "wan2.2-i2v-flash") {
+				aliReq.Parameters.Resolution = "720P"
+			} else if strings.HasPrefix(req.Model, "wan2.2-i2v-plus") {
+				aliReq.Parameters.Resolution = "1080P"
+			} else {
+				aliReq.Parameters.Resolution = "720P"
+			}
+		}
+	}
+
+	// 
+	if req.Duration > 0 {
+		aliReq.Parameters.Duration = req.Duration
+	} else if req.Seconds != "" {
+		seconds, err := strconv.Atoi(req.Seconds)
+		if err != nil {
+			return nil, errors.Wrap(err, "convert seconds to int failed")
+		} else {
+			aliReq.Parameters.Duration = seconds
+		}
+	} else {
+		aliReq.Parameters.Duration = 5 // 5
+	}
+
+	//  metadata 
+	if req.Metadata != nil {
+		if metadataBytes, err := common.Marshal(req.Metadata); err == nil {
+			err = common.Unmarshal(metadataBytes, aliReq)
+			if err != nil {
+				return nil, errors.Wrap(err, "unmarshal metadata failed")
+			}
+		} else {
+			return nil, errors.Wrap(err, "marshal metadata failed")
+		}
+	}
+
+	if aliReq.Model != upstreamModel {
+		return nil, errors.New("can't change model with metadata")
+	}
+
+	return aliReq, nil
+}
+
+// EstimateBilling  OtherRatios
+//  ValidateRequestAndSetAction 
+func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInfo) map[string]float64 {
+	taskReq, err := relaycommon.GetTaskRequest(c)
+	if err != nil {
+		return nil
+	}
+
+	aliReq, err := a.convertToAliRequest(info, taskReq)
+	if err != nil {
+		return nil
+	}
+
+	otherRatios := map[string]float64{
+		"seconds": float64(aliReq.Parameters.Duration),
+	}
+	ratios, err := ProcessAliOtherRatios(aliReq)
+	if err != nil {
+		return otherRatios
+	}
+	for k, v := range ratios {
+		otherRatios[k] = v
+	}
+	return otherRatios
+}
+
+// DoRequest delegates to common helper
+func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (*http.Response, error) {
+	return channel.DoTaskApiRequest(a, c, info, requestBody)
+}
+
+// DoResponse handles upstream response
+func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (taskID string, taskData []byte, taskErr *dto.TaskError) {
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		taskErr = service.TaskErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError)
+		return
+	}
+	_ = resp.Body.Close()
+
+	// 
+	var aliResp AliVideoResponse
+	if err := common.Unmarshal(responseBody, &aliResp); err != nil {
+		taskErr = service.TaskErrorWrapper(errors.Wrapf(err, "body: %s", responseBody), "unmarshal_response_body_failed", http.StatusInternalServerError)
+		return
+	}
+
+	// 
+	if aliResp.Code != "" {
+		taskErr = service.TaskErrorWrapper(fmt.Errorf("%s: %s", aliResp.Code, aliResp.Message), "ali_api_error", resp.StatusCode)
+		return
+	}
+
+	if aliResp.Output.TaskID == "" {
+		taskErr = service.TaskErrorWrapper(fmt.Errorf("task_id is empty"), "invalid_response", http.StatusInternalServerError)
+		return
+	}
+
+	//  OpenAI 
+	openAIResp := dto.NewOpenAIVideo()
+	openAIResp.ID = info.PublicTaskID
+	openAIResp.TaskID = info.PublicTaskID
+	openAIResp.Model = c.GetString("model")
+	if openAIResp.Model == "" && info != nil {
+		openAIResp.Model = info.OriginModelName
+	}
+	openAIResp.Status = convertAliStatus(aliResp.Output.TaskStatus)
+	openAIResp.CreatedAt = common.GetTimestamp()
+
+	//  OpenAI 
+	c.JSON(http.StatusOK, openAIResp)
+
+	return aliResp.Output.TaskID, responseBody, nil
+}
+
+// FetchTask 
+func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
+	taskID, ok := body["task_id"].(string)
+	if !ok {
+		return nil, fmt.Errorf("invalid task_id")
+	}
+
+	uri := fmt.Sprintf("%s/api/v1/tasks/%s", baseUrl, taskID)
+
+	req, err := http.NewRequest(http.MethodGet, uri, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Authorization", "Bearer "+key)
+
+	client, err := service.GetHttpClientWithProxy(proxy)
+	if err != nil {
+		return nil, fmt.Errorf("new proxy http client failed: %w", err)
+	}
+	return client.Do(req)
+}
+
+func (a *TaskAdaptor) GetModelList() []string {
+	return ModelList
+}
+
+func (a *TaskAdaptor) GetChannelName() string {
+	return ChannelName
+}
+
+// ParseTaskResult 
+func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, error) {
+	var aliResp AliVideoResponse
+	if err := common.Unmarshal(respBody, &aliResp); err != nil {
+		return nil, errors.Wrap(err, "unmarshal task result failed")
+	}
+
+	taskResult := relaycommon.TaskInfo{
+		Code: 0,
+	}
+
+	// 
+	switch aliResp.Output.TaskStatus {
+	case "PENDING":
+		taskResult.Status = model.TaskStatusQueued
+	case "RUNNING":
+		taskResult.Status = model.TaskStatusInProgress
+	case "SUCCEEDED":
+		taskResult.Status = model.TaskStatusSuccess
+		// URL
+		taskResult.Url = aliResp.Output.VideoURL
+	case "FAILED", "CANCELED", "UNKNOWN":
+		taskResult.Status = model.TaskStatusFailure
+		if aliResp.Message != "" {
+			taskResult.Reason = aliResp.Message
+		} else if aliResp.Output.Message != "" {
+			taskResult.Reason = fmt.Sprintf("task failed, code: %s , message: %s", aliResp.Output.Code, aliResp.Output.Message)
+		} else {
+			taskResult.Reason = "task failed"
+		}
+	default:
+		taskResult.Status = model.TaskStatusQueued
+	}
+
+	return &taskResult, nil
+}
+
+func (a *TaskAdaptor) ConvertToOpenAIVideo(task *model.Task) ([]byte, error) {
+	var aliResp AliVideoResponse
+	if err := common.Unmarshal(task.Data, &aliResp); err != nil {
+		return nil, errors.Wrap(err, "unmarshal ali response failed")
+	}
+
+	openAIResp := dto.NewOpenAIVideo()
+	openAIResp.ID = task.TaskID
+	openAIResp.Status = convertAliStatus(aliResp.Output.TaskStatus)
+	openAIResp.Model = task.Properties.OriginModelName
+	openAIResp.SetProgressStr(task.Progress)
+	openAIResp.CreatedAt = task.CreatedAt
+	openAIResp.CompletedAt = task.UpdatedAt
+
+	// URL
+	openAIResp.SetMetadata("url", aliResp.Output.VideoURL)
+
+	// 
+	if aliResp.Code != "" {
+		openAIResp.Error = &dto.OpenAIVideoError{
+			Code:    aliResp.Code,
+			Message: aliResp.Message,
+		}
+	} else if aliResp.Output.Code != "" {
+		openAIResp.Error = &dto.OpenAIVideoError{
+			Code:    aliResp.Output.Code,
+			Message: aliResp.Output.Message,
+		}
+	}
+
+	return common.Marshal(openAIResp)
+}
+
+func convertAliStatus(aliStatus string) string {
+	switch aliStatus {
+	case "PENDING":
+		return dto.VideoStatusQueued
+	case "RUNNING":
+		return dto.VideoStatusInProgress
+	case "SUCCEEDED":
+		return dto.VideoStatusCompleted
+	case "FAILED", "CANCELED", "UNKNOWN":
+		return dto.VideoStatusFailed
+	default:
+		return dto.VideoStatusUnknown
+	}
+}

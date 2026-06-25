@@ -1,0 +1,127 @@
+/*
+Copyright (C) 2025 QuantumNous
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+For commercial licensing, please contact support@quantumnous.com
+*/
+
+import React from 'react';
+import SelectableButtonGroup from '../../../common/ui/SelectableButtonGroup';
+import { getLobeHubIcon } from '../../../../helpers';
+
+/**
+ * 
+ * @param {string|'all'} filterVendor 
+ * @param {Function} setFilterVendor setter
+ * @param {Array} models 
+ * @param {Array} allModels 
+ * @param {boolean} loading 
+ * @param {Function} t i18n
+ */
+const PricingVendors = ({
+  filterVendor,
+  setFilterVendor,
+  models = [],
+  allModels = [],
+  loading = false,
+  t,
+}) => {
+  //  allModels models
+  const getAllVendors = React.useMemo(() => {
+    const vendors = new Set();
+    const vendorIcons = new Map();
+    let hasUnknownVendor = false;
+
+    (allModels.length > 0 ? allModels : models).forEach((model) => {
+      if (model.vendor_name) {
+        vendors.add(model.vendor_name);
+        if (model.vendor_icon && !vendorIcons.has(model.vendor_name)) {
+          vendorIcons.set(model.vendor_name, model.vendor_icon);
+        }
+      } else {
+        hasUnknownVendor = true;
+      }
+    });
+
+    return {
+      vendors: Array.from(vendors).sort(),
+      vendorIcons,
+      hasUnknownVendor,
+    };
+  }, [allModels, models]);
+
+  //  models
+  const getVendorCount = React.useCallback(
+    (vendor) => {
+      if (vendor === 'all') {
+        return models.length;
+      }
+      if (vendor === 'unknown') {
+        return models.filter((model) => !model.vendor_name).length;
+      }
+      return models.filter((model) => model.vendor_name === vendor).length;
+    },
+    [models],
+  );
+
+  // 
+  const items = React.useMemo(() => {
+    const result = [
+      {
+        value: 'all',
+        label: t(''),
+        tagCount: getVendorCount('all'),
+      },
+    ];
+
+    // 
+    getAllVendors.vendors.forEach((vendor) => {
+      const count = getVendorCount(vendor);
+      const icon = getAllVendors.vendorIcons.get(vendor);
+      result.push({
+        value: vendor,
+        label: vendor,
+        icon: icon ? getLobeHubIcon(icon, 16) : null,
+        tagCount: count,
+      });
+    });
+
+    // ""
+    if (getAllVendors.hasUnknownVendor) {
+      const count = getVendorCount('unknown');
+      result.push({
+        value: 'unknown',
+        label: t(''),
+        tagCount: count,
+      });
+    }
+
+    return result;
+  }, [getAllVendors, getVendorCount, t]);
+
+  return (
+    <SelectableButtonGroup
+      title={t('')}
+      items={items}
+      activeValue={filterVendor}
+      onChange={setFilterVendor}
+      loading={loading}
+      variant='violet'
+      t={t}
+    />
+  );
+};
+
+export default PricingVendors;

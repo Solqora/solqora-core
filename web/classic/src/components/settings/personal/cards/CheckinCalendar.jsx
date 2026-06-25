@@ -1,0 +1,384 @@
+/*
+Copyright (C) 2025 QuantumNous
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+For commercial licensing, please contact support@quantumnous.com
+*/
+
+import React, { useState, useEffect, useMemo } from 'react';
+import {
+  Card,
+  Calendar,
+  Button,
+  Typography,
+  Avatar,
+  Spin,
+  Tooltip,
+  Collapsible,
+  Modal,
+} from '@douyinfe/semi-ui';
+import {
+  CalendarCheck,
+  Gift,
+  Check,
+  ChevronDown,
+  ChevronUp,
+} from 'lucide-react';
+import Turnstile from 'react-turnstile';
+import { API, showError, showSuccess, renderQuota } from '../../../../helpers';
+
+const CheckinCalendar = ({ t, status, turnstileEnabled, turnstileSiteKey }) => {
+  const [loading, setLoading] = useState(false);
+  const [checkinLoading, setCheckinLoading] = useState(false);
+  const [turnstileModalVisible, setTurnstileModalVisible] = useState(false);
+  const [turnstileWidgetKey, setTurnstileWidgetKey] = useState(0);
+  const [checkinData, setCheckinData] = useState({
+    enabled: false,
+    stats: {
+      checked_in_today: false,
+      total_checkins: 0,
+      total_quota: 0,
+      checkin_count: 0,
+      records: [],
+    },
+  });
+  const [currentMonth, setCurrentMonth] = useState(
+    new Date().toISOString().slice(0, 7),
+  );
+  // 
+  const [initialLoaded, setInitialLoaded] = useState(false);
+  // null 
+  const [isCollapsed, setIsCollapsed] = useState(null);
+
+  // 
+  const checkinRecordsMap = useMemo(() => {
+    const map = {};
+    const records = checkinData.stats?.records || [];
+    records.forEach((record) => {
+      map[record.checkin_date] = record.quota_awarded;
+    });
+    return map;
+  }, [checkinData.stats?.records]);
+
+  // 
+  const monthlyQuota = useMemo(() => {
+    const records = checkinData.stats?.records || [];
+    return records.reduce(
+      (sum, record) => sum + (record.quota_awarded || 0),
+      0,
+    );
+  }, [checkinData.stats?.records]);
+
+  // 
+  const fetchCheckinStatus = async (month) => {
+    const isFirstLoad = !initialLoaded;
+    setLoading(true);
+    try {
+      const res = await API.get(`/api/user/checkin?month=${month}`);
+      const { success, data, message } = res.data;
+      if (success) {
+        setCheckinData(data);
+        // 
+        if (isFirstLoad) {
+          setIsCollapsed(data.stats?.checked_in_today ?? false);
+          setInitialLoaded(true);
+        }
+      } else {
+        showError(message || t(''));
+        if (isFirstLoad) {
+          setIsCollapsed(false);
+          setInitialLoaded(true);
+        }
+      }
+    } catch (error) {
+      showError(t(''));
+      if (isFirstLoad) {
+        setIsCollapsed(false);
+        setInitialLoaded(true);
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const postCheckin = async (token) => {
+    const url = token
+      ? `/api/user/checkin?turnstile=${encodeURIComponent(token)}`
+      : '/api/user/checkin';
+    return API.post(url);
+  };
+
+  const shouldTriggerTurnstile = (message) => {
+    if (!turnstileEnabled) return false;
+    if (typeof message !== 'string') return true;
+    return message.includes('Turnstile');
+  };
+
+  const doCheckin = async (token) => {
+    setCheckinLoading(true);
+    try {
+      const res = await postCheckin(token);
+      const { success, data, message } = res.data;
+      if (success) {
+        showSuccess(
+          t('') + ' ' + renderQuota(data.quota_awarded),
+        );
+        // 
+        fetchCheckinStatus(currentMonth);
+        setTurnstileModalVisible(false);
+      } else {
+        if (!token && shouldTriggerTurnstile(message)) {
+          if (!turnstileSiteKey) {
+            showError('Turnstile is enabled but site key is empty.');
+            return;
+          }
+          setTurnstileModalVisible(true);
+          return;
+        }
+        if (token && shouldTriggerTurnstile(message)) {
+          setTurnstileWidgetKey((v) => v + 1);
+        }
+        showError(message || t(''));
+      }
+    } catch (error) {
+      showError(t(''));
+    } finally {
+      setCheckinLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (status?.checkin_enabled) {
+      fetchCheckinStatus(currentMonth);
+    }
+  }, [status?.checkin_enabled, currentMonth]);
+
+  // 
+  if (!status?.checkin_enabled) {
+    return null;
+  }
+
+  //  - 
+  const dateRender = (dateString) => {
+    // Semi Calendar  dateString  Date.toString() 
+    //  YYYY-MM-DD 
+    const date = new Date(dateString);
+    if (isNaN(date.getTime())) {
+      return null;
+    }
+    // 
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const formattedDate = `${year}-${month}-${day}`; // YYYY-MM-DD
+    const quotaAwarded = checkinRecordsMap[formattedDate];
+    const isCheckedIn = quotaAwarded !== undefined;
+
+    if (isCheckedIn) {
+      return (
+        <Tooltip
+          content={`${t('')} ${renderQuota(quotaAwarded)}`}
+          position='top'
+        >
+          <div className='absolute inset-0 flex flex-col items-center justify-center cursor-pointer'>
+            <div className='w-6 h-6 rounded-full bg-green-500 flex items-center justify-center mb-0.5 shadow-sm'>
+              <Check size={14} className='text-white' strokeWidth={3} />
+            </div>
+            <div className='text-[10px] font-medium text-green-600 dark:text-green-400 leading-none'>
+              {renderQuota(quotaAwarded)}
+            </div>
+          </div>
+        </Tooltip>
+      );
+    }
+    return null;
+  };
+
+  // 
+  const handleMonthChange = (date) => {
+    const month = date.toISOString().slice(0, 7);
+    setCurrentMonth(month);
+  };
+
+  return (
+    <Card className='!rounded-2xl'>
+      <Modal
+        title='Security Check'
+        visible={turnstileModalVisible}
+        footer={null}
+        centered
+        onCancel={() => {
+          setTurnstileModalVisible(false);
+          setTurnstileWidgetKey((v) => v + 1);
+        }}
+      >
+        <div className='flex justify-center py-2'>
+          <Turnstile
+            key={turnstileWidgetKey}
+            sitekey={turnstileSiteKey}
+            onVerify={(token) => {
+              doCheckin(token);
+            }}
+            onExpire={() => {
+              setTurnstileWidgetKey((v) => v + 1);
+            }}
+          />
+        </div>
+      </Modal>
+
+      {/*  */}
+      <div className='flex items-center justify-between'>
+        <div
+          className='flex items-center flex-1 cursor-pointer'
+          onClick={() => setIsCollapsed(!isCollapsed)}
+        >
+          <Avatar size='small' color='green' className='mr-3 shadow-md'>
+            <CalendarCheck size={16} />
+          </Avatar>
+          <div className='flex-1'>
+            <div className='flex items-center gap-2'>
+              <Typography.Text className='text-lg font-medium'>
+                {t('')}
+              </Typography.Text>
+              {isCollapsed ? (
+                <ChevronDown size={16} className='text-gray-400' />
+              ) : (
+                <ChevronUp size={16} className='text-gray-400' />
+              )}
+            </div>
+            <div className='text-xs text-gray-500 dark:text-gray-400'>
+              {!initialLoaded
+                ? t('...')
+                : checkinData.stats?.checked_in_today
+                  ? t('') +
+                    ` ${checkinData.stats?.total_checkins || 0} ` +
+                    t('')
+                  : t('')}
+            </div>
+          </div>
+        </div>
+        <Button
+          type='primary'
+          theme='solid'
+          icon={<Gift size={16} />}
+          onClick={() => doCheckin()}
+          loading={checkinLoading || !initialLoaded}
+          disabled={!initialLoaded || checkinData.stats?.checked_in_today}
+          className='!bg-green-600 hover:!bg-green-700'
+        >
+          {!initialLoaded
+            ? t('...')
+            : checkinData.stats?.checked_in_today
+              ? t('')
+              : t('')}
+        </Button>
+      </div>
+
+      {/*  */}
+      <Collapsible isOpen={isCollapsed === false} keepDOM>
+        {/*  */}
+        <div className='grid grid-cols-3 gap-3 mb-4 mt-4'>
+          <div className='text-center p-2.5 bg-slate-50 dark:bg-slate-800 rounded-lg'>
+            <div className='text-xl font-bold text-green-600'>
+              {checkinData.stats?.total_checkins || 0}
+            </div>
+            <div className='text-xs text-gray-500'>{t('')}</div>
+          </div>
+          <div className='text-center p-2.5 bg-slate-50 dark:bg-slate-800 rounded-lg'>
+            <div className='text-xl font-bold text-orange-600'>
+              {renderQuota(monthlyQuota, 6)}
+            </div>
+            <div className='text-xs text-gray-500'>{t('')}</div>
+          </div>
+          <div className='text-center p-2.5 bg-slate-50 dark:bg-slate-800 rounded-lg'>
+            <div className='text-xl font-bold text-blue-600'>
+              {renderQuota(checkinData.stats?.total_quota || 0, 6)}
+            </div>
+            <div className='text-xs text-gray-500'>{t('')}</div>
+          </div>
+        </div>
+
+        {/*  -  */}
+        <Spin spinning={loading}>
+          <div className='border rounded-lg overflow-hidden checkin-calendar'>
+            <style>{`
+            .checkin-calendar .semi-calendar {
+              font-size: 13px;
+            }
+            .checkin-calendar .semi-calendar-month-header {
+              padding: 8px 12px;
+            }
+            .checkin-calendar .semi-calendar-month-week-row {
+              height: 28px;
+            }
+            .checkin-calendar .semi-calendar-month-week-row th {
+              font-size: 12px;
+              padding: 4px 0;
+            }
+            .checkin-calendar .semi-calendar-month-grid-row {
+              height: auto;
+            }
+            .checkin-calendar .semi-calendar-month-grid-row td {
+              height: 56px;
+              padding: 2px;
+            }
+            .checkin-calendar .semi-calendar-month-grid-row-cell {
+              position: relative;
+              height: 100%;
+            }
+            .checkin-calendar .semi-calendar-month-grid-row-cell-day {
+              position: absolute;
+              top: 4px;
+              left: 50%;
+              transform: translateX(-50%);
+              font-size: 12px;
+              z-index: 1;
+            }
+            .checkin-calendar .semi-calendar-month-same {
+              background: transparent;
+            }
+            .checkin-calendar .semi-calendar-month-today .semi-calendar-month-grid-row-cell-day {
+              background: var(--semi-color-primary);
+              color: white;border-radius: 50%;
+              width: 20px;
+              height: 20px;
+              display: flex;
+              align-items: center;
+              justify-content: center;}
+          `}</style>
+            <Calendar
+              mode='month'
+              onChange={handleMonthChange}
+              dateGridRender={(dateString, date) => dateRender(dateString)}
+            />
+          </div>
+        </Spin>
+
+        {/*  */}
+        <div className='mt-3 p-2.5 bg-slate-50 dark:bg-slate-800 rounded-lg'>
+          <Typography.Text type='tertiary' className='text-xs'>
+            <ul className='list-disc list-inside space-y-0.5'>
+              <li>{t('')}</li>
+              <li>{t('')}</li>
+              <li>{t('')}</li>
+            </ul>
+          </Typography.Text>
+        </div>
+      </Collapsible>
+    </Card>
+  );
+};
+
+export default CheckinCalendar;

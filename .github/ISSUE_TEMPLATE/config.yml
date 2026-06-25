@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name:  / Documentation
+    url: https://docs.solqora.xyz/
+    about:  issue 
+  - name:  / Usage Questions
+    url: https://deepwiki.com/solqora/solqora-core
+    about:  DeepWiki 
